@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:8081/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "VectoFly - Free Endless 3D Plane Game | Play Online",
+      "hasCanvas": true,
+      "bodyTextLen": 1195,
+      "bodyTextHash": "c0b47919fa35e87c63e953c72d764c800e1112f20959966045e69b7d15800320",
+      "bodyTextPrefix": "VectoFly ENDLESS SKIES LEVEL 1 SCORE 0 DAMAGE FUEL LIVE 1. Ace (",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "VectoFly - Free Endless 3D Plane Game | Play Online",
+      "hasCanvas": true,
+      "bodyTextLen": 1047,
+      "bodyTextHash": "213e4fd9d2671f2f0549c070dcb5378796b4b09953028c0a83d75570fc85ea36",
+      "bodyTextPrefix": "♫ VectoFly Slide to steer. Blue pills repair you, orange cans re",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json",
+  "divergesFromBaseline": false,
+  "baselineReasons": []
+}

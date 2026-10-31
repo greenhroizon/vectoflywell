@@ -1,0 +1,14 @@
+{
+  "installCommand": "npm install --omit=dev --no-audit --no-fund",
+  "redirects": [
+    { "source": "/about.html", "destination": "/about", "permanent": true },
+    { "source": "/contact.html", "destination": "/contact", "permanent": true },
+    { "source": "/how-to-play.html", "destination": "/how-to-play", "permanent": true },
+    { "source": "/privacy.html", "destination": "/privacy", "permanent": true },
+    { "source": "/terms.html", "destination": "/terms", "permanent": true },
+    { "source": "/cookie-policy.html", "destination": "/cookies", "permanent": true },
+    { "source": "/disclaimer.html", "destination": "/disclaimer", "permanent": true },
+    { "source": "/dmca.html", "destination": "/dmca", "permanent": true },
+    { "source": "/leaderboard.html", "destination": "/leaderboard", "permanent": true }
+  ]
+}

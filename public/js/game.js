@@ -1,0 +1,1052 @@
+// VectoFly core: scene, flat endless Chrome-dino-style world, obstacles, blue pills, fuel, DAMAGE, main loop.
+// Based on "The Aviator" by Karim Maaloul (Codrops). isMobile + Colors live in config.js.
+
+// GAME VARIABLES
+var game;
+var deltaTime = 0;
+var newTime = new Date().getTime();
+var oldTime = new Date().getTime();
+var ennemiesPool = [];
+var particlesPool = [];
+
+// world scrolling: how many world units the ground / obstacles move per (speed * millisecond)
+var K_SCROLL = 420;
+var SPAWN_X = 470, DESPAWN_X = -340;
+var dxFrame = 0;                                  // world units scrolled this frame
+
+function resetGame(){
+  game = {speed:0,
+          initSpeed:.00044,
+          baseSpeed:.00044,
+          targetBaseSpeed:.00044,
+          incrementSpeedByTime:.0000025,
+          incrementSpeedByLevel:.000005,
+          distanceForSpeedUpdate:100,
+          speedLastUpdate:0,
+
+          distance:0,
+          ratioSpeedDistance:50,
+          damage:0,                              // 0 = pristine, 100 = the plane is destroyed
+
+          level:1,
+          levelLastUpdate:0,
+          distanceForLevelUpdate:1000,
+
+          planeDefaultHeight:100,
+          planeAmpHeight:80,
+          planeAmpWidth:75,
+          planeMoveSensivity:0.005,
+          planeRotXSensivity:0.0008,
+          planeRotZSensivity:0.0004,
+          planeFallSpeed:.001,
+          planeMinSpeed:1.2,
+          planeMaxSpeed:1.6,
+          planeSpeed:0,
+          planeCollisionDisplacementX:0,
+          planeCollisionSpeedX:0,
+
+          planeCollisionDisplacementY:0,
+          planeCollisionSpeedY:0,
+
+          cameraFarPos:500,
+          cameraNearPos:150,
+          cameraSensivity:0.002,
+
+          coinDistanceTolerance:15,
+          coinValue:2,                           // damage repaired by one blue pill
+          coinsSpeed:1,
+          coinLastSpawn:0,
+          distanceForCoinsSpawn:85,
+
+          ennemyDistanceTolerance:11,
+          ennemyValue:20,                        // damage taken from one red spike
+          ennemiesSpeed:1,
+          ennemyLastSpawn:0,
+          distanceForEnnemiesSpawn:48, spawnStart:48, spawnMin:30, spawnStep:2.5, waveBase:2,
+          safeLane:3, waveN:0, idleMs:0, idleY:100, forceSeek:false, reason:"",
+          fuel:100, fuelBase:.075, fuelPerLevel:.004, fuelEff:1, fuelValue:40, fuelLastSpawn:0, distanceForFuelSpawn:450,
+          maxBaseSpeed:.0011,
+          speedPerMeter:.00000012,
+          crashT:0,
+
+          status : "playing"
+         };
+  fieldLevel.innerHTML = Math.floor(game.level);
+}
+
+//THREEJS RELATED VARIABLES
+
+var scene,
+    camera, fieldOfView, aspectRatio, nearPlane, farPlane,
+    renderer,
+    container,
+    controls;
+
+//SCREEN & MOUSE VARIABLES
+
+var HEIGHT, WIDTH,
+    mousePos = { x: 0, y: 0 };
+
+//INIT THREE JS, SCREEN AND MOUSE EVENTS
+
+function createScene() {
+
+  HEIGHT = window.innerHeight;
+  WIDTH = window.innerWidth;
+
+  scene = new THREE.Scene();
+  aspectRatio = WIDTH / HEIGHT;
+  fieldOfView = 50;
+  nearPlane = .1;
+  farPlane = 10000;
+  camera = new THREE.PerspectiveCamera(
+    fieldOfView,
+    aspectRatio,
+    nearPlane,
+    farPlane
+    );
+  scene.fog = new THREE.Fog(0xf7d9aa, 220, 1150);
+  camera.position.x = 0;
+  camera.position.z = 200;
+  camera.position.y = game.planeDefaultHeight;
+
+  try { renderer = new THREE.WebGLRenderer({ alpha: true, antialias: !isMobile }); }
+  catch(e){ document.body.innerHTML='<p style="padding:24px;font-family:sans-serif">Sorry, WebGL is not supported on this device or browser.</p>'; throw e; }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, isTight() ? 1.25 : 2));
+  renderer.setSize(WIDTH, HEIGHT);
+
+  renderer.shadowMap.enabled = !isTight();
+  if (renderer.shadowMap.enabled) renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+  container = document.getElementById('world');
+  container.appendChild(renderer.domElement);
+
+  window.addEventListener('resize', handleWindowResize, false);
+  window.addEventListener('orientationchange', function(){ setTimeout(handleWindowResize, 250); }, false);
+  fitCamera();
+}
+
+// MOUSE AND SCREEN EVENTS
+
+function handleWindowResize() {
+  HEIGHT = window.innerHeight;
+  WIDTH = window.innerWidth;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, isTight() ? 1.25 : 2));
+  renderer.setSize(WIDTH, HEIGHT);
+  aspectRatio = WIDTH / HEIGHT;
+  camera.aspect = aspectRatio;
+  fitCamera();
+}
+
+// ---------- INPUT ----------
+// Mouse: absolute (the plane follows the pointer).
+// Touch: RELATIVE drag. Put a thumb anywhere and slide: the plane moves by the amount you slide, so your thumb never hides the plane,
+// there is no jump when you touch down, and a small thumb movement covers the whole height. Hold the on-screen buttons for fine moves.
+var lastTouchT = 0, steer = null;
+function onPad(t){ return !!(t && t.closest && t.closest('#ctl, #soundBtn, #panel, #shop, a, button, input, label')); }
+function clamp1(v){ return Math.max(-1, Math.min(1, v)); }
+function isTight(){
+  var w = window.innerWidth, h = window.innerHeight;
+  return isMobile || w < h || Math.min(w, h) < 560;
+}
+var LANES = 5, LANE_YS = [];
+function layoutLanes(){
+  var tight = isTight();
+  var portrait = window.innerHeight > window.innerWidth;
+  LANES = portrait ? 5 : (tight ? 5 : 6);
+  var y0 = 28, y1 = 172;
+  LANE_YS = [];
+  for (var i = 0; i < LANES; i++) LANE_YS.push(y0 + (y1 - y0) * (i / (LANES - 1)));
+}
+function laneY(i){ if (!LANE_YS.length) layoutLanes(); return LANE_YS[Math.max(0, Math.min(LANES - 1, i))]; }
+function nearestLane(y){
+  if (!LANE_YS.length) layoutLanes();
+  var best = 0, bd = 1e9;
+  for (var i = 0; i < LANES; i++){ var d = Math.abs(LANE_YS[i] - y); if (d < bd){ bd = d; best = i; } }
+  return best;
+}
+var fitFov = 56, fitZ = 190;
+function fitCamera(){
+  if (typeof camera === 'undefined' || !camera) return;
+  var tight = isTight();
+  var portrait = window.innerHeight > window.innerWidth;
+  var short = window.innerHeight < 430;
+  fitFov = short ? 50 : portrait ? 60 : tight ? 56 : 52;
+  fitZ = short ? 210 : portrait ? 158 : tight ? 172 : 198;
+  camera.fov = fitFov;
+  camera.position.z = fitZ;
+  camera.updateProjectionMatrix();
+  layoutLanes();
+}
+
+function handleMouseMove(event) {
+  if (Date.now() - lastTouchT < 900) return;          // browsers fire fake mouse events after a tap: ignore them
+  if (window.VF) VF.touching = false;
+  if (onPad(event.target) || (window.VF && VF.padHeld && VF.padHeld())) return;   // steering with the buttons: ignore the pointer
+  var tx = -1 + (event.clientX / WIDTH)*2;
+  var ty = 1 - (event.clientY / HEIGHT)*2;
+  mousePos = {x:tx, y:ty};
+}
+
+function handleTouchStart(e){
+  lastTouchT = Date.now(); if (window.VF) VF.touching = true;
+  if (game.status!="playing" || steer) return;
+  for (var i=0;i<e.changedTouches.length;i++){
+    var t = e.changedTouches[i];
+    if (!onPad(t.target)){ steer = {id:t.identifier, px:t.clientX, py:t.clientY, mx:mousePos.x, my:mousePos.y}; break; }
+  }
+}
+
+function handleTouchMove(e){
+  lastTouchT = Date.now();
+  if (game.status!="playing") return;
+  e.preventDefault();                                   // no scrolling / pull-to-refresh while flying
+  if (!steer) return;
+  var t = null;
+  for (var i=0;i<e.touches.length;i++){ if (e.touches[i].identifier===steer.id){ t = e.touches[i]; break; } }
+  if (!t) return;
+  if (window.VF && VF.padHeld && VF.padHeld()){ steer.px=t.clientX; steer.py=t.clientY; steer.mx=mousePos.x; steer.my=mousePos.y; return; }   // buttons win; re-anchor so nothing jumps afterwards
+  var portrait = HEIGHT > WIDTH;
+  var ry = portrait ? Math.max(86, Math.min(160, HEIGHT * 0.16)) : Math.max(110, Math.min(200, HEIGHT * 0.26));
+  var rx = portrait ? Math.max(100, Math.min(220, WIDTH * 0.72)) : Math.max(150, Math.min(280, WIDTH * 0.42));
+  mousePos = {x: clamp1(steer.mx + (t.clientX - steer.px) * 2 / rx), y: clamp1(steer.my - (t.clientY - steer.py) * 2 / ry)};
+}
+
+function handleTouchEnd(e){
+  lastTouchT = Date.now();
+  if (!steer) return;
+  for (var i=0;i<e.changedTouches.length;i++){ if (e.changedTouches[i].identifier===steer.id){ steer = null; break; } }
+}
+
+function handleMouseUp(event){}
+
+// LIGHTS
+
+var ambientLight, hemisphereLight, shadowLight, rimLight;
+
+function createLights() {
+
+  hemisphereLight = new THREE.HemisphereLight(0xaaaaaa,0x000000, .9)
+
+  ambientLight = new THREE.AmbientLight(0xdc8874, .5);
+
+  shadowLight = new THREE.DirectionalLight(0xffffff, .9);
+  shadowLight.position.set(90, 380, 170);
+  shadowLight.castShadow = !isTight();
+  shadowLight.shadow.camera.left = -460;
+  shadowLight.shadow.camera.right = 460;
+  shadowLight.shadow.camera.top = 460;
+  shadowLight.shadow.camera.bottom = -460;
+  shadowLight.shadow.camera.near = 1;
+  shadowLight.shadow.camera.far = 1100;
+  shadowLight.shadow.bias = -0.0006;
+  shadowLight.shadow.mapSize.width = isMobile?1024:2048;
+  shadowLight.shadow.mapSize.height = isMobile?1024:2048;
+
+  // a weak cool light from behind/below the camera lifts the shaded side of the plane (looks less flat)
+  rimLight = new THREE.DirectionalLight(0xbfd8ff, .22);
+  rimLight.position.set(-200, 60, 260);
+
+  scene.add(hemisphereLight);
+  scene.add(shadowLight);
+  scene.add(rimLight);
+  scene.add(ambientLight);
+
+}
+
+
+var Pilot = function(){
+  this.mesh = new THREE.Object3D();
+  this.mesh.name = "pilot";
+  this.angleHairs=0;
+
+  var bodyGeom = new THREE.BoxGeometry(15,15,15);
+  var bodyMat = new THREE.MeshPhongMaterial({color:Colors.brown, shading:THREE.FlatShading});
+  var body = new THREE.Mesh(bodyGeom, bodyMat);
+  body.position.set(2,-12,0);
+
+  this.mesh.add(body);
+
+  var faceGeom = new THREE.BoxGeometry(10,10,10);
+  var faceMat = new THREE.MeshLambertMaterial({color:Colors.pink});
+  var face = new THREE.Mesh(faceGeom, faceMat);
+  this.mesh.add(face);
+
+  var hairGeom = new THREE.BoxGeometry(4,4,4);
+  var hairMat = new THREE.MeshLambertMaterial({color:Colors.brown});
+  var hair = new THREE.Mesh(hairGeom, hairMat);
+  hair.geometry.applyMatrix(new THREE.Matrix4().makeTranslation(0,2,0));
+  var hairs = new THREE.Object3D();
+
+  this.hairsTop = new THREE.Object3D();
+
+  for (var i=0; i<12; i++){
+    var h = hair.clone();
+    var col = i%3;
+    var row = Math.floor(i/3);
+    var startPosZ = -4;
+    var startPosX = -4;
+    h.position.set(startPosX + row*4, 0, startPosZ + col*4);
+    h.geometry.applyMatrix(new THREE.Matrix4().makeScale(1,1,1));
+    this.hairsTop.add(h);
+  }
+  hairs.add(this.hairsTop);
+
+  var hairSideGeom = new THREE.BoxGeometry(12,4,2);
+  hairSideGeom.applyMatrix(new THREE.Matrix4().makeTranslation(-6,0,0));
+  var hairSideR = new THREE.Mesh(hairSideGeom, hairMat);
+  var hairSideL = hairSideR.clone();
+  hairSideR.position.set(8,-2,6);
+  hairSideL.position.set(8,-2,-6);
+  hairs.add(hairSideR);
+  hairs.add(hairSideL);
+
+  var hairBackGeom = new THREE.BoxGeometry(2,8,10);
+  var hairBack = new THREE.Mesh(hairBackGeom, hairMat);
+  hairBack.position.set(-1,-4,0)
+  hairs.add(hairBack);
+  hairs.position.set(-5,5,0);
+
+  this.mesh.add(hairs);
+
+  var glassGeom = new THREE.BoxGeometry(5,5,5);
+  var glassMat = new THREE.MeshLambertMaterial({color:Colors.brown});
+  var glassR = new THREE.Mesh(glassGeom,glassMat);
+  glassR.position.set(6,0,3);
+  var glassL = glassR.clone();
+  glassL.position.z = -glassR.position.z
+  var glassAGeom = new THREE.BoxGeometry(11,1,11);
+  var glassA = new THREE.Mesh(glassAGeom, glassMat);
+  this.mesh.add(glassR);
+  this.mesh.add(glassL);
+  this.mesh.add(glassA);
+
+  var earGeom = new THREE.BoxGeometry(2,3,2);
+  var earL = new THREE.Mesh(earGeom,faceMat);
+  earL.position.set(0,0,-6);
+  var earR = earL.clone();
+  earR.position.set(0,0,6);
+  this.mesh.add(earL);
+  this.mesh.add(earR);
+}
+
+Pilot.prototype.updateHairs = function(){
+   var hairs = this.hairsTop.children;
+   var l = hairs.length;
+   for (var i=0; i<l; i++){
+      var h = hairs[i];
+      h.scale.y = .75 + Math.cos(this.angleHairs+i/3)*.25;
+   }
+  this.angleHairs += game.speed*deltaTime*40;
+}
+
+// ---------- OBSTACLES ----------
+// Lanes are laid out by layoutLanes() so portrait phones get fewer, wider corridors.
+// The safe gate always stays next to where you are flying, so a wave is never off-screen.
+function clampLane(l){ return Math.max(0, Math.min(LANES - 1, l)); }
+function laneClear(y, reach, x0, x1){
+  var list = ennemiesHolder.ennemiesInUse;
+  for (var i=0;i<list.length;i++){ var e = list[i]; if (e.x > x0 && e.x < x1 && Math.abs((e.seek ? e.y : e.y0) - y) < reach) return false; }
+  return true;
+}
+
+var gatePool = [], gates = [];
+function clearGates(){
+  while (gates.length){ var g = gates.pop(); g.m.visible = false; if (g.m.parent) g.m.parent.remove(g.m); gatePool.push(g.m); }
+}
+function spawnGate(y, h){
+  var m = gatePool.pop();
+  if (!m){
+    m = new THREE.Mesh(
+      new THREE.PlaneGeometry(22, 1),
+      new THREE.MeshBasicMaterial({color:0x68c3c0, transparent:true, opacity:0.34, depthWrite:false, fog:false})
+    );
+  }
+  m.scale.y = Math.max(28, h);
+  m.position.set(SPAWN_X, y, -4);
+  m.visible = true;
+  scene.add(m);
+  gates.push({m:m, x:SPAWN_X, y:y});
+}
+function updateGates(){
+  for (var i = gates.length - 1; i >= 0; i--){
+    var g = gates[i];
+    g.x -= dxFrame;
+    g.m.position.x = g.x;
+    g.m.material.opacity = g.x < 40 ? Math.max(0, 0.34 * (g.x - DESPAWN_X) / (40 - DESPAWN_X)) : 0.34;
+    if (g.x < DESPAWN_X){ g.m.visible = false; scene.remove(g.m); gatePool.push(g.m); gates.splice(i, 1); }
+  }
+}
+
+Ennemy = function(){
+  var geom = new THREE.TetrahedronGeometry(8,2);
+  var mat = new THREE.MeshPhongMaterial({
+    color:Colors.red,
+    emissive:0x5a140e,
+    shininess:40,
+    specular:0xffb0a0,
+    shading:THREE.FlatShading
+  });
+  this.mesh = new THREE.Mesh(geom,mat);
+  this.mesh.castShadow = !isTight();
+  this.x = 0; this.y = 0; this.y0 = 0; this.seek = false; this.locked = false; this.bob = 0; this.ph = 0; this.grazed = 0;
+}
+Ennemy.prototype.setKind = function(seek){
+  this.seek = seek; this.locked = false; this.bob = 0; this.grazed = 0;
+  var m = this.mesh.material;
+  m.color.setHex(seek ? 0xff8a1f : Colors.red); m.emissive.setHex(seek ? 0x6a3000 : 0x5a140e);
+  var sc = (seek ? 1.22 : 1) * (isTight() ? 1.12 : 1);
+  this.mesh.scale.set(sc,sc,sc);
+}
+
+EnnemiesHolder = function (){
+  this.mesh = new THREE.Object3D();
+  this.ennemiesInUse = [];
+}
+
+EnnemiesHolder.prototype.add = function(x, y, seek){
+  var ennemy = ennemiesPool.length ? ennemiesPool.pop() : new Ennemy();
+  ennemy.setKind(!!seek);
+  ennemy.x = x; ennemy.y = y; ennemy.y0 = y;
+  ennemy.mesh.position.set(x, y, 0);
+  this.mesh.add(ennemy.mesh);
+  this.ennemiesInUse.push(ennemy);
+  return ennemy;
+}
+
+EnnemiesHolder.prototype.spawnSeekers = function(n){
+  var py = airplane.mesh.position.y;
+  for (var k=0;k<n;k++){
+    var y = Math.max(24, Math.min(176, py + (k ? (Math.random()<.5 ? -1 : 1) * 22 : 0)));
+    this.add(SPAWN_X + k * 90, y, true);
+  }
+  spawnGate(py, 36);
+}
+
+// Every wave keeps a reachable gate beside the pilot. Portrait never gets a one-lane slit.
+EnnemiesHolder.prototype.spawnEnnemies = function(){
+  game.waveN++;
+  if (!LANE_YS.length) layoutLanes();
+  var lvl = game.level;
+  var tight = isTight();
+  var py = airplane.mesh.position.y;
+  var playerLane = nearestLane(py);
+  var grace = game.distance < (tight ? 420 : 240);
+
+  if (grace){
+    var off = playerLane <= 1 ? playerLane + 2 : playerLane - 2;
+    off = clampLane(off);
+    this.add(SPAWN_X, laneY(off), false);
+    game.safeLane = playerLane;
+    spawnGate(laneY(playerLane), 48);
+    return;
+  }
+
+  var maxStep = lvl < 4 ? 1 : (tight ? 1 : 2);
+  var dir = Math.random() < 0.5 ? -1 : 1;
+  if (playerLane <= 0) dir = 1;
+  if (playerLane >= LANES - 1) dir = -1;
+  var s = clampLane(playerLane + dir * (Math.random() < 0.55 ? 0 : maxStep));
+  if (Math.abs(s - game.safeLane) > maxStep) s = clampLane(game.safeLane + Math.sign(s - game.safeLane || dir) * maxStep);
+  game.safeLane = s;
+
+  var gapW = 2;
+  if (!tight && lvl >= 9 && Math.random() < 0.35) gapW = 1;
+  if (tight && lvl < 12) gapW = 2;
+
+  var seekEvery = tight ? 7 : 5;
+  var allowSeek = lvl >= (tight ? 8 : 6) && (game.forceSeek || game.waveN % seekEvery === 0);
+  if (allowSeek){
+    game.forceSeek = false; game.idleMs = 0;
+    this.spawnSeekers(1);
+    return;
+  }
+
+  var gates = {};
+  var origin = clampLane(s - Math.floor((gapW - 1) / 2));
+  for (var g = 0; g < gapW; g++) gates[clampLane(origin + g)] = 1;
+  if (Object.keys(gates).length < 2 && LANES > 3){
+    gates[clampLane(s + 1)] = 1;
+    gates[clampLane(s - 1)] = 1;
+  }
+
+  var roll = Math.random();
+  var allowWall = lvl >= (tight ? 4 : 3);
+  var lane, i;
+  if (allowWall && roll < (tight ? 0.34 : 0.46)){
+    for (lane = 0; lane < LANES; lane++) if (!gates[lane]) this.add(SPAWN_X, laneY(lane), false);
+  } else {
+    var n = 1 + Math.floor(lvl / (tight ? 4 : 3));
+    n = Math.min(n, tight ? 2 : 3);
+    var used = {};
+    for (var k in gates) used[k] = 1;
+    for (i = 0; i < n; i++){
+      var guard = 0;
+      do { lane = Math.floor(Math.random() * LANES); guard++; } while (used[lane] && guard < 12);
+      if (used[lane]) continue;
+      if (Math.abs(lane - s) < 1) continue;
+      used[lane] = 1;
+      this.add(SPAWN_X + i * (tight ? 110 : 80), laneY(lane), false);
+    }
+  }
+  var ys = Object.keys(gates).map(function(k){ return laneY(+k); });
+  var mid = ys.reduce(function(a,b){ return a+b; }, 0) / ys.length;
+  var span = Math.max.apply(null, ys) - Math.min.apply(null, ys);
+  spawnGate(mid, Math.max(46, span + 36));
+}
+
+EnnemiesHolder.prototype.rotateEnnemies = function(){
+  for (var i=0; i<this.ennemiesInUse.length; i++){
+    var ennemy = this.ennemiesInUse[i];
+    var mult = ennemy.seek ? 1.15 : 1;
+    ennemy.x -= dxFrame*game.ennemiesSpeed*mult;
+    ennemy.mesh.position.x = ennemy.x;
+    if (ennemy.seek && !ennemy.locked && game.status=="playing"){
+      var followUntil = isTight() ? 780 : 520;
+      var vx = deltaTime > 0 ? dxFrame*game.ennemiesSpeed*mult/deltaTime : 0;
+      if (vx > .0001 && (ennemy.x - airplane.mesh.position.x)/vx > followUntil) ennemy.y += (airplane.mesh.position.y - ennemy.y)*Math.min(1, deltaTime*(isTight()?0.0032:0.005));
+      else ennemy.locked = true;
+      ennemy.mesh.position.y = ennemy.y;
+      if (Math.random() < .25) emitPuff(ennemy.x + 8, ennemy.y, 2);
+    } else if (ennemy.bob){
+      ennemy.y = ennemy.y0 + Math.sin(newTime*.0035 + ennemy.ph)*ennemy.bob;
+      ennemy.mesh.position.y = ennemy.y;
+    }
+    ennemy.mesh.rotation.z += Math.random()*.1;
+    ennemy.mesh.rotation.y += Math.random()*.1;
+
+    var diffPos = airplane.mesh.position.clone().sub(ennemy.mesh.position);
+    var d = diffPos.length();
+    if (!ennemy.grazed && game.status=="playing" && d > game.ennemyDistanceTolerance * 1.15 && d < game.ennemyDistanceTolerance * 2.4 && Math.abs(ennemy.mesh.position.x - airplane.mesh.position.x) < 24){
+      ennemy.grazed = 1;
+      if (window.VF && VF.onNear) VF.onNear();
+    }
+    if (d<game.ennemyDistanceTolerance*(ennemy.seek ? 1.15 : 1) && game.status=="playing"){
+      particlesHolder.spawnParticles(ennemy.mesh.position.clone(), 15, ennemy.seek ? 0xff8a1f : Colors.red, 3);
+
+      ennemiesPool.unshift(this.ennemiesInUse.splice(i,1)[0]);
+      this.mesh.remove(ennemy.mesh);
+      game.planeCollisionSpeedX = 100 * diffPos.x / d;
+      game.planeCollisionSpeedY = 100 * diffPos.y / d;
+      ambientLight.intensity = 2;
+
+      addDamage(); VF.onHit(); hitFlash();
+      i--;
+    }else if (ennemy.x < DESPAWN_X){
+      ennemiesPool.unshift(this.ennemiesInUse.splice(i,1)[0]);
+      this.mesh.remove(ennemy.mesh);
+      i--;
+    }
+  }
+}
+
+function hitFlash(){
+  var f = document.getElementById('flash'); if (!f) return;
+  f.className = ''; void f.offsetWidth; f.className = 'hit';
+}
+
+Particle = function(){
+  var geom = new THREE.TetrahedronGeometry(3,0);
+  var mat = new THREE.MeshPhongMaterial({
+    color:0x009999,
+    shininess:0,
+    specular:0xffffff,
+    shading:THREE.FlatShading
+  });
+  this.mesh = new THREE.Mesh(geom,mat);
+}
+
+Particle.prototype.explode = function(pos, color, scale){
+  var _this = this;
+  var _p = this.mesh.parent;
+  this.mesh.material.color = new THREE.Color( color);
+  this.mesh.material.needsUpdate = true;
+  this.mesh.scale.set(scale, scale, scale);
+  var targetX = pos.x + (-1 + Math.random()*2)*50;
+  var targetY = pos.y + (-1 + Math.random()*2)*50;
+  var speed = .6+Math.random()*.2;
+  TweenMax.to(this.mesh.rotation, speed, {x:Math.random()*12, y:Math.random()*12});
+  TweenMax.to(this.mesh.scale, speed, {x:.1, y:.1, z:.1});
+  TweenMax.to(this.mesh.position, speed, {x:targetX, y:targetY, delay:Math.random() *.1, ease:Power2.easeOut, onComplete:function(){
+      if(_p) _p.remove(_this.mesh);
+      _this.mesh.scale.set(1,1,1);
+      particlesPool.unshift(_this);
+    }});
+}
+
+ParticlesHolder = function (){
+  this.mesh = new THREE.Object3D();
+}
+
+ParticlesHolder.prototype.spawnParticles = function(pos, density, color, scale){
+  var nPArticles = density;
+  for (var i=0; i<nPArticles; i++){
+    var particle;
+    if (particlesPool.length) {
+      particle = particlesPool.pop();
+    }else{
+      particle = new Particle();
+    }
+    this.mesh.add(particle.mesh);
+    particle.mesh.visible = true;
+    particle.mesh.position.y = pos.y;
+    particle.mesh.position.x = pos.x;
+    particle.explode(pos,color, scale);
+  }
+}
+
+Coin = function(){
+  var geom = new THREE.TetrahedronGeometry(5,0);
+  var mat = new THREE.MeshPhongMaterial({
+    color:0x009999,
+    emissive:0x00383a,
+    shininess:90,
+    specular:0xcffffa,
+    shading:THREE.FlatShading
+  });
+  this.mesh = new THREE.Mesh(geom,mat);
+  this.mesh.castShadow = true;
+  this.x = 0; this.y = 0;
+}
+
+CoinsHolder = function (nCoins){
+  this.mesh = new THREE.Object3D();
+  this.coinsInUse = [];
+  this.coinsPool = [];
+  for (var i=0; i<nCoins; i++){
+    var coin = new Coin();
+    this.coinsPool.push(coin);
+  }
+}
+
+CoinsHolder.prototype.spawnCoins = function(){
+
+  var nCoins = 1 + Math.floor(Math.random()*10);
+  // pills are not always in the safe lane any more: half of the trails sweep a random height with a big wave, so you must move to get them
+  var lane = game.safeLane, amplitude = isTight() ? 6 : 8 + Math.round(Math.random()*5);
+  if (!isTight() && Math.random() < .45){
+    var cand = Math.floor(Math.random()*LANES), amp = 10 + Math.round(Math.random()*16);
+    if (laneClear(laneY(cand), amp + 26, SPAWN_X - 90, SPAWN_X + 220)){ lane = cand; amplitude = amp; }
+  } else if (isTight() && Math.random() < .25){
+    var alt = clampLane(game.safeLane + (Math.random()<0.5?-1:1));
+    if (laneClear(laneY(alt), 30, SPAWN_X - 40, SPAWN_X + 180)) lane = alt;
+  }
+  var d = laneY(lane);
+  for (var i=0; i<nCoins; i++){
+    var coin;
+    if (this.coinsPool.length) {
+      coin = this.coinsPool.pop();
+    }else{
+      coin = new Coin();
+    }
+    this.mesh.add(coin.mesh);
+    this.coinsInUse.push(coin);
+    coin.x = SPAWN_X + i*14;
+    coin.y = Math.max(16, Math.min(184, d + Math.cos(i*.5)*amplitude));
+    coin.mesh.position.set(coin.x, coin.y, 0);
+  }
+}
+
+CoinsHolder.prototype.rotateCoins = function(){
+  for (var i=0; i<this.coinsInUse.length; i++){
+    var coin = this.coinsInUse[i];
+    coin.x -= dxFrame*game.coinsSpeed;
+    coin.mesh.position.x = coin.x;
+    coin.mesh.rotation.z += Math.random()*.1;
+    coin.mesh.rotation.y += Math.random()*.1;
+
+    var diffPos = airplane.mesh.position.clone().sub(coin.mesh.position);
+    var d = diffPos.length();
+    if (d<game.coinDistanceTolerance*(window.VF && VF.touching ? 1.2 : 1) && game.status=="playing"){
+      this.coinsPool.unshift(this.coinsInUse.splice(i,1)[0]);
+      this.mesh.remove(coin.mesh);
+      particlesHolder.spawnParticles(coin.mesh.position.clone(), 5, 0x009999, .8);
+      repairDamage(); VF.onCoin();
+      i--;
+    }else if (coin.x < DESPAWN_X){
+      this.coinsPool.unshift(this.coinsInUse.splice(i,1)[0]);
+      this.mesh.remove(coin.mesh);
+      i--;
+    }
+  }
+}
+
+
+Fuel = function(){
+  this.mesh = new THREE.Object3D();
+  var mat = new THREE.MeshPhongMaterial({color:0xf4a63a, emissive:0x7a4a00, shininess:60, specular:0xffe0a0, shading:THREE.FlatShading});
+  var body = new THREE.Mesh(new THREE.BoxGeometry(10,13,6), mat);
+  var cap = new THREE.Mesh(new THREE.BoxGeometry(4,3,3), new THREE.MeshPhongMaterial({color:Colors.brownDark, shading:THREE.FlatShading}));
+  cap.position.set(-2,8,0);
+  var stripe = new THREE.Mesh(new THREE.BoxGeometry(10.5,3,6.5), new THREE.MeshPhongMaterial({color:Colors.white, shading:THREE.FlatShading}));
+  this.mesh.add(body); this.mesh.add(cap); this.mesh.add(stripe);
+  body.castShadow = true;
+  this.mesh.scale.set(1.5,1.5,1.5);
+  this.x = 0; this.y = 0;
+}
+FuelHolder = function(){ this.mesh = new THREE.Object3D(); this.inUse = []; this.pool = []; }
+FuelHolder.prototype.spawn = function(){
+  var f = this.pool.length ? this.pool.pop() : new Fuel();
+  var fl = game.safeLane;
+  if (!isTight() && Math.random() < .55){ var c = Math.floor(Math.random()*LANES); if (laneClear(laneY(c), 40, SPAWN_X - 90, SPAWN_X + 120)) fl = c; }
+  f.x = SPAWN_X; f.y = laneY(fl);
+  f.mesh.position.set(f.x, f.y, 0);
+  this.mesh.add(f.mesh); this.inUse.push(f);
+}
+FuelHolder.prototype.rotate = function(){
+  for (var i=0; i<this.inUse.length; i++){
+    var f = this.inUse[i];
+    f.x -= dxFrame*game.coinsSpeed;
+    f.mesh.position.x = f.x;
+    f.mesh.rotation.y += .05;
+    var d = airplane.mesh.position.clone().sub(f.mesh.position).length();
+    if (game.status=="playing" && d < game.coinDistanceTolerance*1.8){
+      game.fuel = Math.min(100, game.fuel + game.fuelValue); guardFuel = game.fuel;
+      particlesHolder.spawnParticles(f.mesh.position.clone(), 10, 0xf4a63a, 1);
+      VF.onFuel();
+    } else if (f.x > DESPAWN_X) continue;
+    this.pool.push(this.inUse.splice(i,1)[0]); this.mesh.remove(f.mesh); i--;
+  }
+}
+var fuelHolder, fuelBar;
+function createFuel(){ fuelHolder = new FuelHolder(); scene.add(fuelHolder.mesh); }
+function updateFuel(dd){
+  if (game.fuel > guardFuel + .001) VF.cheat('fuel');
+  game.fuel -= dd*(game.fuelBase + Math.min(game.level,12)*game.fuelPerLevel)*game.fuelEff;
+  game.fuel = Math.max(0, game.fuel); guardFuel = game.fuel;
+  fuelBar.style.right = (100-game.fuel)+"%";
+  fuelBar.style.backgroundColor = (game.fuel<30)? "#f25346" : "#f4a63a";
+  fuelBar.style.animationName = (game.fuel<30)? "blinking" : "none";
+  if (game.fuel<=0 && game.status=="playing") endRun("Out of fuel!");
+}
+
+// ---------- SMOKE + FIRE (a damaged plane trails smoke, a nearly dead one burns) and jet exhaust ----------
+var Puffs = {root:null, pool:[], act:[], t:0};
+function createPuffs(){
+  Puffs.root = new THREE.Object3D(); scene.add(Puffs.root);
+  var geom = new THREE.IcosahedronGeometry(3, 0);
+  for (var i=0;i<46;i++){
+    var m = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({color:0x888888, transparent:true, opacity:.6, fog:true, depthWrite:false}));
+    m.visible = false; Puffs.root.add(m); Puffs.pool.push({m:m, x:0, y:0, vy:0, life:0, max:1, s0:1, s1:2, a:.6});
+  }
+}
+function emitPuff(x, y, kind){
+  var p = Puffs.pool.pop(); if (!p) return;
+  var col, life, s0, s1, vy, a;
+  if (kind === 2){ col = Math.random() < .5 ? 0xff7a1a : 0xffc23a; life = 380; s0 = .8; s1 = 1.8; vy = .02; a = .9; }      // fire
+  else if (kind === 1){ col = 0x2c2c30; life = 900; s0 = .9; s1 = 3.6; vy = .035; a = .62; }                             // dark smoke
+  else if (kind === 3){ col = 0xffffff; life = 700; s0 = .5; s1 = 1.9; vy = .004; a = .4; }                              // jet contrail
+  else { col = 0xb8b8bc; life = 800; s0 = .8; s1 = 3; vy = .03; a = .5; }                                                  // light smoke
+  p.m.material.color.setHex(col); p.m.material.opacity = a; p.a = a;
+  p.x = x + (Math.random()-.5)*3; p.y = y + (Math.random()-.5)*3; p.vy = vy; p.life = p.max = life; p.s0 = s0; p.s1 = s1;
+  p.m.position.set(p.x, p.y, (Math.random()-.5)*4); p.m.scale.set(s0,s0,s0); p.m.visible = true; Puffs.act.push(p);
+}
+function updatePuffs(){
+  for (var i=Puffs.act.length-1;i>=0;i--){
+    var p = Puffs.act[i]; p.life -= deltaTime;
+    if (p.life <= 0){ p.m.visible = false; Puffs.act.splice(i,1); Puffs.pool.push(p); continue; }
+    var k = 1 - p.life/p.max;
+    p.x -= dxFrame; p.y += p.vy*deltaTime;
+    var s = p.s0 + (p.s1-p.s0)*k; p.m.scale.set(s,s,s);
+    p.m.position.x = p.x; p.m.position.y = p.y; p.m.material.opacity = p.a*(1-k);
+    p.m.rotation.x += .03; p.m.rotation.y += .02;
+  }
+}
+function clearPuffs(){ while (Puffs.act.length){ var p = Puffs.act.pop(); p.m.visible = false; Puffs.pool.push(p); } }
+var TRAIL_KINDS = {jet:1, rocket:1, stealth:1, bizjet:1, shuttle:1, interceptor:1, airliner:1};
+function emitPlaneEffects(){
+  Puffs.t += deltaTime;
+  var dm = game.damage, step = dm >= 85 ? 45 : dm >= 65 ? 75 : dm >= 40 ? 130 : 0;
+  var tx = airplane.mesh.position.x + airplane.tail*.25, ty = airplane.mesh.position.y;
+  if (step && Puffs.t > step){
+    Puffs.t = 0;
+    emitPuff(tx, ty, dm >= 85 ? 2 : dm >= 65 ? 1 : 0);
+    if (dm >= 85) emitPuff(tx, ty, 1);
+  } else if (!step && TRAIL_KINDS[airplane.kind] && Puffs.t > 70){
+    Puffs.t = 0; emitPuff(tx, ty, 3);
+  }
+}
+
+// 3D Models
+var airplane;
+var particlesHolder, coinsHolder, ennemiesHolder;
+
+// (re)builds the player's plane from the hangar choice. Called by vectofly.js whenever plane / paint changes.
+function setPlaneModel(kind, spec, base){
+  var old = airplane ? airplane.mesh : null;
+  var a = PB.build(kind, spec, base);
+  a.mesh.scale.set(.25,.25,.25);
+  a.mesh.position.y = game.planeDefaultHeight;
+  if (old){
+    a.mesh.position.copy(old.position); a.mesh.rotation.copy(old.rotation);
+    scene.remove(old);
+    old.traverse(function(o){ if (o.geometry) o.geometry.dispose(); });
+  }
+  scene.add(a.mesh);
+  airplane = a;
+}
+
+function createPlane(){ setPlaneModel('prop', null, '#f25346'); }
+
+function createCoins(){
+  coinsHolder = new CoinsHolder(20);
+  scene.add(coinsHolder.mesh)
+}
+
+function createEnnemies(){
+  for (var i=0; i<10; i++){
+    var ennemy = new Ennemy();
+    ennemiesPool.push(ennemy);
+  }
+  ennemiesHolder = new EnnemiesHolder();
+  scene.add(ennemiesHolder.mesh)
+}
+
+function createParticles(){
+  for (var i=0; i<10; i++){
+    var particle = new Particle();
+    particlesPool.push(particle);
+  }
+  particlesHolder = new ParticlesHolder();
+  scene.add(particlesHolder.mesh)
+}
+
+function loop(){
+
+  newTime = new Date().getTime();
+  if (VF.paused){ oldTime=newTime; requestAnimationFrame(loop); return; }
+  deltaTime = Math.min(newTime-oldTime,50);
+  oldTime = newTime;
+
+  if (game.status=="playing"){
+
+    if (game.distance-game.ennemyLastSpawn >= game.distanceForEnnemiesSpawn){ game.ennemyLastSpawn=game.distance; ennemiesHolder.spawnEnnemies(); }
+    if (game.distance-game.coinLastSpawn >= game.distanceForCoinsSpawn){ game.coinLastSpawn=game.distance; coinsHolder.spawnCoins(); }
+    if (game.distance-game.fuelLastSpawn >= game.distanceForFuelSpawn){ game.fuelLastSpawn=game.distance; fuelHolder.spawn(); }
+    var lv = 1+Math.floor(game.distance/game.distanceForLevelUpdate);
+    if (lv>game.level){ game.level=lv; fieldLevel.innerHTML=lv; game.distanceForEnnemiesSpawn=Math.max(game.spawnMin, game.spawnStart - game.spawnStep*lv); game.distanceForFuelSpawn=Math.max(330,450-5*lv); VF.onLevel(lv); }
+    // endless Chrome-dino style ramp: speed grows continuously with distance
+    game.targetBaseSpeed = Math.min(game.maxBaseSpeed, game.initSpeed + game.distance*game.speedPerMeter);
+
+    updatePlane();
+    updateDistance();
+    updateDamage();
+    game.baseSpeed += (game.targetBaseSpeed - game.baseSpeed) * deltaTime * 0.02;
+    game.speed = game.baseSpeed * game.planeSpeed;
+
+  }else if(game.status=="gameover"){
+    game.speed *= Math.pow(.985, deltaTime/16.7);
+    airplane.mesh.rotation.z += (-Math.PI/2 - airplane.mesh.rotation.z)*.0006*deltaTime;
+    airplane.mesh.rotation.x += 0.0004*deltaTime;
+    game.planeFallSpeed *= Math.pow(1.04, deltaTime/16.7);
+    airplane.mesh.position.y -= game.planeFallSpeed*deltaTime;
+    if (Math.random() < .6) emitPuff(airplane.mesh.position.x, airplane.mesh.position.y, Math.random() < .5 ? 2 : 1);
+
+    var gy = World.groundAt(airplane.mesh.position.x, 0) + 6;
+    if (airplane.mesh.position.y <= gy){
+      // impact: explosion, wreck stays on the ground and the world rolls to a stop
+      airplane.mesh.position.y = gy;
+      var ip = airplane.mesh.position.clone();
+      particlesHolder.spawnParticles(ip, 30, 0xf4a63a, 4);
+      particlesHolder.spawnParticles(ip, 22, 0xd6483b, 3.4);
+      particlesHolder.spawnParticles(ip, 16, 0x2c2c30, 3);
+      VF.onHit(); hitFlash();
+      for (var q=0;q<10;q++) emitPuff(ip.x, ip.y + 2, q%3 ? 1 : 2);
+      game.status = "crashed"; game.crashT = 0;
+    }
+  }else if (game.status=="crashed"){
+    game.speed *= Math.pow(.94, deltaTime/16.7); game.crashT += deltaTime;
+    if (Math.random() < .25) emitPuff(airplane.mesh.position.x, airplane.mesh.position.y + 3, Math.random() < .3 ? 2 : 1);
+    if (game.crashT > 900){ showReplay(); game.status = "waitingReplay"; }
+  }else if (game.status=="menu"){
+    game.speed=.0005;
+    airplane.mesh.position.y=game.planeDefaultHeight+Math.sin(newTime/400)*6;
+  }else if (game.status=="waitingReplay"){
+    game.speed *= Math.pow(.96, deltaTime/16.7);
+  }
+
+  dxFrame = game.speed*deltaTime*K_SCROLL;
+  World.update(dxFrame, deltaTime);
+
+  airplane.propeller.rotation.x +=.2 + game.planeSpeed * deltaTime*.005;
+  if (airplane.tick) airplane.tick(deltaTime);
+
+  ambientLight.intensity += (.5 - ambientLight.intensity)*deltaTime*0.005;
+
+  coinsHolder.rotateCoins();
+  fuelHolder.rotate();
+  ennemiesHolder.rotateEnnemies();
+  updateGates();
+  updateWarn();
+
+  if (game.status=="playing") emitPlaneEffects();
+  updatePuffs();
+  VF.onFrame();
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+function updateDistance(){
+  var dd = game.speed*deltaTime*game.ratioSpeedDistance; game.distance += dd; VF.tick(dd, deltaTime); updateFuel(dd);
+  fieldDistance.innerHTML = VF.score();
+  var d = 502*(1-(game.distance%game.distanceForLevelUpdate)/game.distanceForLevelUpdate);
+  levelCircle.setAttribute("stroke-dashoffset", d);
+}
+
+// ---------- DAMAGE ----------
+// Red spikes add damage, blue pills repair it. At 100 damage the plane is destroyed.
+function updateDamage(){
+  if (Math.abs(game.damage - guardDamage) > .01) VF.cheat('damage');
+  var dm = Math.min(100, Math.max(0, game.damage));
+  damageBar.style.right = (100-dm)+"%";
+  damageBar.style.backgroundColor = dm < 40 ? "#68c3c0" : dm < 70 ? "#f4a63a" : "#f25346";
+  damageBar.style.animationName = dm > 70 ? "blinking" : "none";
+  if (dm >= 100 && game.status=="playing") endRun("Crashed!");
+}
+
+// Integrity guards: damage / fuel may only change through the functions below. If something else edits them
+// (console, injected script), the run is stopped and not submitted. The server re-checks every score anyway.
+var guardDamage = 0, guardFuel = 100;
+function repairDamage(){
+  game.damage = Math.max(0, game.damage - game.coinValue); guardDamage = game.damage;
+}
+
+function addDamage(){
+  game.damage = Math.min(100, game.damage + game.ennemyValue); guardDamage = game.damage;
+}
+
+function endRun(reason){
+  if (game.status!="playing") return;
+  game.reason = reason; game.status = "gameover"; game.planeFallSpeed = .001;
+  VF.onGameOver();
+}
+
+
+function updatePlane(){
+
+  game.planeSpeed = normalize(mousePos.x,-.5,.5,game.planeMinSpeed, game.planeMaxSpeed);
+  var targetY = normalize(mousePos.y,-.75,.75,game.planeDefaultHeight-game.planeAmpHeight, game.planeDefaultHeight+game.planeAmpHeight);
+  var targetX = normalize(mousePos.x,-1,1,-game.planeAmpWidth*.7, -game.planeAmpWidth);
+
+  game.planeCollisionDisplacementX += game.planeCollisionSpeedX;
+  targetX += game.planeCollisionDisplacementX;
+
+
+  game.planeCollisionDisplacementY += game.planeCollisionSpeedY;
+  targetY += game.planeCollisionDisplacementY;
+
+  var sens = game.planeMoveSensivity * ((window.VF && VF.touching) ? (isTight() ? 2.6 : 2.1) : 1);
+  airplane.mesh.position.y += (targetY-airplane.mesh.position.y)*deltaTime*sens;
+  airplane.mesh.position.x += (targetX-airplane.mesh.position.x)*deltaTime*sens;
+
+  airplane.mesh.rotation.z = (targetY-airplane.mesh.position.y)*deltaTime*game.planeRotXSensivity;
+  airplane.mesh.rotation.x = (airplane.mesh.position.y-targetY)*deltaTime*game.planeRotZSensivity;
+  if (game.damage > 60){ var j = (game.damage-60)/40*.05; airplane.mesh.rotation.z += (Math.random()-.5)*j; airplane.mesh.rotation.x += (Math.random()-.5)*j; }
+  if (!isTight()){
+    camera.fov = fitFov + mousePos.x * 2.5;
+    camera.updateProjectionMatrix();
+  }
+  var lookY = airplane.mesh.position.y * 0.78 + game.planeDefaultHeight * 0.22;
+  camera.position.y += (lookY - camera.position.y)*deltaTime*game.cameraSensivity;
+
+  game.planeCollisionSpeedX += (0-game.planeCollisionSpeedX)*deltaTime * 0.03;
+  game.planeCollisionDisplacementX += (0-game.planeCollisionDisplacementX)*deltaTime *0.01;
+  game.planeCollisionSpeedY += (0-game.planeCollisionSpeedY)*deltaTime * 0.03;
+  game.planeCollisionDisplacementY += (0-game.planeCollisionDisplacementY)*deltaTime *0.01;
+
+  airplane.pilot.updateHairs();
+
+  // standing still (same height for ~2.5 s) calls in a homing spike
+  if (Math.abs(airplane.mesh.position.y - game.idleY) < 7) game.idleMs += deltaTime; else { game.idleY = airplane.mesh.position.y; game.idleMs = 0; }
+  if (game.idleMs > (isTight() ? 5200 : 3200)) game.forceSeek = true;
+}
+
+// red "!" at the right edge, at the height of an incoming homing spike that is still off screen
+var warnEl = null, warnV = null;
+function updateWarn(){
+  if (!warnEl) warnEl = document.getElementById('warn');
+  if (!warnEl) return;
+  var show = false, y = 0;
+  if (game.status=="playing"){
+    var list = ennemiesHolder.ennemiesInUse;
+    for (var i=0;i<list.length;i++){
+      var e = list[i]; if (!e.seek) continue;
+      if (!warnV) warnV = new THREE.Vector3();
+      warnV.copy(e.mesh.position).project(camera);
+      if (warnV.x > .9 || warnV.z > 1){ show = true; y = Math.max(70, Math.min(HEIGHT-130, (1-warnV.y)/2*HEIGHT)); break; }
+    }
+  }
+  if (show){ warnEl.style.top = Math.round(y-16)+'px'; if (warnEl.style.display!=='block') warnEl.style.display='block'; }
+  else if (warnEl.style.display!=='none') warnEl.style.display='none';
+}
+
+function startGame(){
+  resetGame(); VF.applyPerks(); guardDamage = 0; guardFuel = 100; mousePos = {x:0, y:0}; steer = null;
+  airplane.mesh.position.y=game.planeDefaultHeight; airplane.mesh.rotation.set(0,0,0);
+  while(ennemiesHolder.ennemiesInUse.length){ var e=ennemiesHolder.ennemiesInUse.pop(); ennemiesHolder.mesh.remove(e.mesh); ennemiesPool.push(e); }
+  while(fuelHolder.inUse.length){ var u=fuelHolder.inUse.pop(); fuelHolder.mesh.remove(u.mesh); fuelHolder.pool.push(u); }
+  while(coinsHolder.coinsInUse.length){ var c=coinsHolder.coinsInUse.pop(); coinsHolder.mesh.remove(c.mesh); coinsHolder.coinsPool.push(c); }
+  clearPuffs();
+  clearGates();
+  damageBar.style.right = "100%"; damageBar.style.animationName = "none";
+}
+
+function showReplay(){
+  VF.showGameOver();
+}
+
+function hideReplay(){
+
+}
+
+function normalize(v,vmin,vmax,tmin, tmax){
+  var nv = Math.max(Math.min(v,vmax), vmin);
+  var dv = vmax-vmin;
+  var pc = (nv-vmin)/dv;
+  var dt = tmax-tmin;
+  var tv = tmin + (pc*dt);
+  return tv;
+}
+
+var fieldDistance, damageBar, replayMessage, fieldLevel, levelCircle;
+
+function init(event){
+
+  if (window.__VF_GAME) return;
+  window.__VF_GAME = 1;
+
+  // UI
+
+  fieldDistance = document.getElementById("distValue");
+  damageBar = document.getElementById("damageBar");
+  fuelBar = document.getElementById("fuelBar");
+  replayMessage = document.getElementById("replayMessage");
+  fieldLevel = document.getElementById("levelValue");
+  levelCircle = document.getElementById("levelCircleStroke");
+
+  resetGame();
+  game.status="menu";
+  createScene();
+
+  createLights();
+  World.init(scene);
+  createPlane();
+  createCoins();
+  createEnnemies();
+  createParticles();
+  createFuel();
+  createPuffs();
+
+  document.addEventListener('mousemove', handleMouseMove, false);
+  document.addEventListener('touchstart', handleTouchStart, {passive:true});
+  document.addEventListener('touchmove', handleTouchMove, {passive:false});
+  document.addEventListener('mouseup', handleMouseUp, false);
+  document.addEventListener('touchend', handleTouchEnd, false);
+  document.addEventListener('touchcancel', handleTouchEnd, false);
+
+  loop();
+}
+
+if (document.getElementById("world")) init();
+else document.addEventListener("DOMContentLoaded", init);
